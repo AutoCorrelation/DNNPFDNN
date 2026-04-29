@@ -1,3 +1,4 @@
-checkpoints/
+*.mat
+*.pth
 *.h5
 *.asv
