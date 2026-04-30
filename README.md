@@ -116,3 +116,11 @@ This repository implements and compares two localization pipelines:
   - `fullyConnectedLayer(64) -> BatchNorm -> ReLU`
   - `fullyConnectedLayer(2)`
   - `regressionLayer`
+
+
+## Refernece.  
+- https://kr.mathworks.com/help/releases/R2025b/deeplearning/ref/trainnet.html
+- https://kr.mathworks.com/help/releases/R2025b/deeplearning/ref/trainingoptions.html
+- https://kr.mathworks.com/help/releases/R2025b/deeplearning/ref/dlnetwork.html
+- https://kr.mathworks.com/help/releases/R2025b/deeplearning/builtin-layers.html
+- https://kr.mathworks.com/help/releases/R2025b/deeplearning/ug/list-of-deep-learning-layers.html

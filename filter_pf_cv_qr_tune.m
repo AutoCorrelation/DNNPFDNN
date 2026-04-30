@@ -56,7 +56,9 @@ for k = 1:numel(noiseLabels)
     noiseLabel = string(noiseLabels(k));
     noiseDataset = string(noiseDatasets(k));
     noiseVar = noiseVariances(k);  % Get variance for this noise condition
-    dnn1File = "checkpoints/dnn1_residual_single_" + noiseLabel + ".mat";
+    % dnn1File = "checkpoints/dnn1_residual_single_" + noiseLabel + ".mat";
+    dnn1File = "checkpoints/dnn1_residual_trainnet_" + noiseLabel + ".mat";
+    
 
     if ~isfile(dnn1File)
         error("DNN1 checkpoint not found: %s", dnn1File);
@@ -123,13 +125,13 @@ for k = 1:numel(noiseLabels)
     summary.BestMeanRMSE(k) = bestRMSE;
     summary.UsedSamples(k) = nEval;
 
-    allTuneResults(k).noiseLabel = noiseLabel; %#ok<SAGROW>
-    allTuneResults(k).R_est = R_est; %#ok<SAGROW>
-    allTuneResults(k).qAlphaGrid = qAlphaGrid; %#ok<SAGROW>
-    allTuneResults(k).gridRMSE = gridRMSE; %#ok<SAGROW>
-    allTuneResults(k).bestQAlpha = bestQAlpha; %#ok<SAGROW>
-    allTuneResults(k).bestRMSE = bestRMSE; %#ok<SAGROW>
-    allTuneResults(k).nEval = nEval; %#ok<SAGROW>
+    allTuneResults(k).noiseLabel = noiseLabel; 
+    allTuneResults(k).R_est = R_est; 
+    allTuneResults(k).qAlphaGrid = qAlphaGrid; 
+    allTuneResults(k).gridRMSE = gridRMSE; 
+    allTuneResults(k).bestQAlpha = bestQAlpha; 
+    allTuneResults(k).bestRMSE = bestRMSE; 
+    allTuneResults(k).nEval = nEval; 
 
     fprintf("[Noise %s] best Q alpha = %.6g | mean RMSE = %.6f\n", noiseLabel, bestQAlpha, bestRMSE);
 end

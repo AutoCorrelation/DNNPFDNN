@@ -37,8 +37,8 @@ for k = 1:numel(noiseLabels)
     pfCkpt = fullfile("checkpoints", "dnn2_postprocess_" + noiseLabel + ".mat");
     if isfile(pfCkpt) && isfile(pfDatasetPath)
         ckptPF = load(pfCkpt, "net");
-        dataPF = dnn2_load_dataset(pfDatasetPath, noiseLabel, 0.80, 0.10, 0.10, 42);
-        yHatPF = predict(ckptPF.net, dataPF.XTest);
+        dataPF = loadDnn2Dataset(pfDatasetPath, noiseLabel, 0.80, 0.10, 0.10, 42);
+        yHatPF = minibatchpredict(ckptPF.net, dataPF.XTest);
         pf_dnn2_rmse = rmse(yHatPF, dataPF.YTest);
     end
 
@@ -47,8 +47,8 @@ for k = 1:numel(noiseLabels)
     lsCkpt = fullfile("checkpoints", "dnn2_postprocess_ls_" + noiseLabel + ".mat");
     if isfile(lsCkpt) && isfile(lsDatasetPath)
         ckptLS = load(lsCkpt, "net");
-        dataLS = dnn2_load_dataset(lsDatasetPath, noiseLabel, 0.80, 0.10, 0.10, 42);
-        yHatLS = predict(ckptLS.net, dataLS.XTest);
+        dataLS = loadDnn2Dataset(lsDatasetPath, noiseLabel, 0.80, 0.10, 0.10, 42);
+        yHatLS = minibatchpredict(ckptLS.net, dataLS.XTest);
         ls_dnn2_rmse = rmse(yHatLS, dataLS.YTest);
     end
 
@@ -128,4 +128,60 @@ if isnan(x)
 else
     s = sprintf("%+.2f%%", x);
 end
+end
+
+function data = loadDnn2Dataset(h5Path, noiseLabel, trainRatio, valRatio, testRatio, seed)
+% Dataset layout:
+% /<noiseLabel>/xPre [4, T, N]
+% /<noiseLabel>/xPF  [2, T, N]
+% /<noiseLabel>/gtPos [2, T, N]
+
+groupPath = "/" + noiseLabel;
+
+xPre = h5read(h5Path, groupPath + "/xPre");
+xPF = h5read(h5Path, groupPath + "/xPF");
+gtPos = h5read(h5Path, groupPath + "/gtPos");
+
+[nPre, numSteps, numSamples] = size(xPre);
+[nPF, numStepsPF, numSamplesPF] = size(xPF);
+[nGT, numStepsGT, numSamplesGT] = size(gtPos);
+
+if nPre ~= 4 || nPF ~= 2 || nGT ~= 2 || ...
+        numSteps ~= numStepsPF || numSteps ~= numStepsGT || ...
+        numSamples ~= numSamplesPF || numSamples ~= numSamplesGT
+    error("Unexpected DNN2 dataset shape for noise %s.", noiseLabel);
+end
+
+rng(seed);
+perm = randperm(numSamples);
+nTrain = floor(trainRatio * numSamples);
+nVal = floor(valRatio * numSamples);
+
+idxTrain = perm(1:nTrain);
+idxVal = perm(nTrain + 1:nTrain + nVal);
+idxTest = perm(nTrain + nVal + 1:end);
+
+data = struct();
+data.XTrain = packSamples(xPre, xPF, idxTrain);
+data.YTrain = packTargets(gtPos, idxTrain);
+data.XVal = packSamples(xPre, xPF, idxVal);
+data.YVal = packTargets(gtPos, idxVal);
+data.XTest = packSamples(xPre, xPF, idxTest);
+data.YTest = packTargets(gtPos, idxTest);
+end
+
+function X = packSamples(xPre, xPF, indices)
+xPreSel = xPre(:, :, indices);
+xPFSel = xPF(:, :, indices);
+X = [transposeToRows(xPFSel), transposeToRows(xPreSel)];
+end
+
+function Y = packTargets(gtPos, indices)
+Y = transposeToRows(gtPos(:, :, indices));
+end
+
+function X = transposeToRows(A)
+% [C, T, N] -> [N*T, C]
+X = permute(A, [3 2 1]);
+X = reshape(X, [], size(A, 1));
 end

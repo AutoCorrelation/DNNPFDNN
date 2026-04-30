@@ -18,7 +18,12 @@ classdef DataGenerator
             elseif nargin < 2       
                 steps = 11;
                 obj.numData = 10000;
+            elseif nargin < 3
+                obj.numData = 10000;
+            else
+                obj.numData = numData;
             end
+            
             if trajectory == "cv"
                 x = linspace(0, 10, steps);
                 y = linspace(0, 10, steps);

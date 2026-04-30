@@ -39,7 +39,8 @@ end
 for k = 1:numel(targets)
 	datasetName = string(targets(k));
 	noiseLabel = extractAfter(datasetName, "/ranging_");
-	dnn1File = "checkpoints/dnn1_residual_single_" + noiseLabel + ".mat";
+	% dnn1File = "checkpoints/dnn1_residual_single_" + noiseLabel + ".mat";
+	dnn1File = "checkpoints/dnn1_residual_trainnet_" + noiseLabel + ".mat";
 
 	if ~isfile(dnn1File)
 		error("Checkpoint not found: %s", dnn1File);

@@ -1,18 +1,18 @@
-%% train_dnn2_multi_branch.m
-% DNN2: postprocessor MLP training for both PF/LS branches in one file.
-% Baseline model/options/flow are kept identical to y_train_dnn2.m.
+%% train_dnn2.m
+% DNN2: postprocessor MLP training (all noise groups) in a single file.
+% Sequence:
+% 1) load one noise-group dataset from H5
+% 2) split train/val/test by sample
+% 3) define model, initialize dlnetwork (addLayers)
+% 4) train with trainnet (mse loss) and evaluate
 
 clear; clc;
 rng(42);
 
-%% Configuration (baseline-aligned)
-branches = struct( ...
-    "name", {"pf", "ls"}, ...
-    "h5Path", {"checkpoints/dnn2_dataset.h5", "checkpoints/dnn2_dataset_ls.h5"}, ...
-    "checkpointPrefix", {"dnn2_postprocess_", "dnn2_postprocess_ls_"} ...
-);
-
+%% Configuration
+h5Path = "checkpoints/dnn2_dataset.h5";
 noiseLabels = ["001", "01", "1", "10", "100"];
+
 trainRatio = 0.80;
 valRatio = 0.10;
 testRatio = 0.10;
@@ -28,67 +28,42 @@ seed = 42;
 assert(abs(trainRatio + valRatio + testRatio - 1.0) < 1e-12, ...
     "Split ratios must sum to 1.");
 
-outDir = "checkpoints";
-if ~isfolder(outDir)
-    mkdir(outDir);
+if ~isfile(h5Path)
+    error("File not found: %s", h5Path);
 end
 
-numRows = numel(branches) * numel(noiseLabels);
-results = table('Size', [numRows, 6], ...
-    'VariableTypes', ["string", "string", "double", "double", "double", "string"], ...
-    'VariableNames', ["branch", "noise", "trainRMSE", "valRMSE", "testRMSE", "checkpoint"]);
+results = table('Size', [numel(noiseLabels), 5], ...
+    'VariableTypes', ["string", "double", "double", "double", "string"], ...
+    'VariableNames', ["noise", "trainRMSE", "valRMSE", "testRMSE", "checkpoint"]);
 
-row = 1;
-for b = 1:numel(branches)
-    branch = branches(b);
+for k = 1:numel(noiseLabels)
+    noiseLabel = string(noiseLabels(k));
 
-    if ~isfile(branch.h5Path)
-        fprintf("Dataset not found. Skip branch %s: %s\n", upper(branch.name), branch.h5Path);
-        for k = 1:numel(noiseLabels)
-            results.branch(row) = string(branch.name);
-            results.noise(row) = string(noiseLabels(k));
-            results.trainRMSE(row) = NaN;
-            results.valRMSE(row) = NaN;
-            results.testRMSE(row) = NaN;
-            results.checkpoint(row) = "";
-            row = row + 1;
-        end
-        continue;
-    end
+    [metrics, outFile] = trainOneNoise( ...
+        h5Path, noiseLabel, trainRatio, valRatio, testRatio, seed, ...
+        optimizerName, maxEpochs, miniBatchSize, initialLearnRate, ...
+        validationPatience, learnRateSchedule);
 
-    fprintf("\n=== Branch: %s ===\n", upper(branch.name));
-    for k = 1:numel(noiseLabels)
-        noiseLabel = string(noiseLabels(k));
+    results.noise(k) = noiseLabel;
+    results.trainRMSE(k) = metrics.trainRMSE;
+    results.valRMSE(k) = metrics.valRMSE;
+    results.testRMSE(k) = metrics.testRMSE;
+    results.checkpoint(k) = string(outFile);
 
-        [metrics, outFile] = trainOneNoise( ...
-            branch.h5Path, branch.name, branch.checkpointPrefix, noiseLabel, ...
-            trainRatio, valRatio, testRatio, seed, optimizerName, ...
-            maxEpochs, miniBatchSize, initialLearnRate, ...
-            validationPatience, learnRateSchedule);
-
-        results.branch(row) = string(branch.name);
-        results.noise(row) = noiseLabel;
-        results.trainRMSE(row) = metrics.trainRMSE;
-        results.valRMSE(row) = metrics.valRMSE;
-        results.testRMSE(row) = metrics.testRMSE;
-        results.checkpoint(row) = string(outFile);
-        row = row + 1;
-
-        fprintf("Saved: %s\n", outFile);
-    end
+    fprintf("Saved: %s\n", outFile);
 end
 
-fprintf("\n=== DNN2 Multi-Branch Training Summary ===\n");
+fprintf("\n=== DNN2 Training Summary ===\n");
 disp(results);
 
 %% Local functions
 function [metrics, outFile] = trainOneNoise( ...
-    h5Path, branchName, checkpointPrefix, noiseLabel, ...
-    trainRatio, valRatio, testRatio, seed, optimizerName, ...
-    maxEpochs, miniBatchSize, initialLearnRate, ...
+    h5Path, noiseLabel, trainRatio, valRatio, testRatio, seed, ...
+    optimizerName, maxEpochs, miniBatchSize, initialLearnRate, ...
     validationPatience, learnRateSchedule)
 
 data = loadDnn2Dataset(h5Path, noiseLabel, trainRatio, valRatio, testRatio, seed);
+
 dlnetInit = createDnn2Model();
 
 opts = trainingOptions(optimizerName, ...
@@ -116,19 +91,20 @@ metrics.trainMSE = mean((YHatTrain - data.YTrain).^2, "all");
 metrics.valMSE = mean((YHatVal - data.YVal).^2, "all");
 metrics.testMSE = mean((YHatTest - data.YTest).^2, "all");
 
-fprintf("\n=== Training Result (%s, noise %s) ===\n", upper(branchName), noiseLabel);
+fprintf("\n=== Training Result (noise %s) ===\n", noiseLabel);
 fprintf("Train RMSE: %.6f | Val RMSE: %.6f | Test RMSE: %.6f\n", ...
     metrics.trainRMSE, metrics.valRMSE, metrics.testRMSE);
 
 outDir = "checkpoints";
-noiseTag = string(noiseLabel);
-outFile = fullfile(outDir, checkpointPrefix + noiseTag + ".mat");
+if ~isfolder(outDir)
+    mkdir(outDir);
+end
+outFile = fullfile(outDir, "dnn2_postprocess_" + noiseLabel + ".mat");
 
 normalization.muX = data.muX;
 normalization.sigmaX = data.sigmaX;
 
 config.h5Path = h5Path;
-config.branch = branchName;
 config.noiseLabel = noiseLabel;
 config.trainRatio = trainRatio;
 config.valRatio = valRatio;
@@ -214,12 +190,12 @@ end
 function net = createDnn2Model()
 layers = [
     featureInputLayer(6, Normalization="none", Name="input")
-    fullyConnectedLayer(16, Name="fc1")
+    fullyConnectedLayer(128, Name="fc1")
     reluLayer(Name="relu1")
-    fullyConnectedLayer(32, Name="fc2")
+    fullyConnectedLayer(64, Name="fc2")
     reluLayer(Name="relu2")
-    fullyConnectedLayer(16, Name="fc3")
-    reluLayer(Name="relu3")
+    % fullyConnectedLayer(4, Name="fc3")
+    % reluLayer(Name="relu3")
     fullyConnectedLayer(2, Name="out")
 ];
 net = dlnetwork;

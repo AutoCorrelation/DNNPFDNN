@@ -14,7 +14,7 @@ anchors = [0 10; 0 0; 10 0; 10 10]';  % [2, 4]
 noiseDatasets = ["/ranging_001", "/ranging_01", "/ranging_1", "/ranging_10", "/ranging_100"];
 noiseLabels = ["001", "01", "1", "10", "100"];
 
-numParticles = 1000;
+numParticles = 500;
 numMC = 1;  % Can increase for ensemble averaging
 
 % Load GT data
@@ -324,9 +324,9 @@ if isempty(bestQDiag)
         case "001"
             bestQDiag = 0.01;
         case "01"
-            bestQDiag = 0.01;
-        case "1"
             bestQDiag = 0.1;
+        case "1"
+            bestQDiag = 1;
         case "10"
             bestQDiag = 1;
         case "100"
@@ -334,7 +334,8 @@ if isempty(bestQDiag)
     end
 end
 
-cfg.dnn1File = "checkpoints/dnn1_residual_single_" + noiseLabel + ".mat";
+% cfg.dnn1File = "checkpoints/dnn1_residual_single_" + noiseLabel + ".mat";
+cfg.dnn1File = "checkpoints/dnn1_residual_trainnet_" + noiseLabel + ".mat";
 cfg.Q = eye(2) * bestQDiag;  % Use tuned Q values
 cfg.R = eye(4) * noiseVar;   % R auto-estimated from DNN residuals
 end
