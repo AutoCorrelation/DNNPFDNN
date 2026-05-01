@@ -3,8 +3,9 @@
 % Sequence:
 % 1) load one noise-group dataset from H5
 % 2) split train/val/test by sample
-% 3) define model, initialize dlnetwork (addLayers)
-% 4) train with trainnet (mse loss) and evaluate
+% 3) z-score normalization (train stats only)
+% 4) residual model: y = [x y] + delta([x y r1 r2 r3 r4])
+% 5) train with trainnet (mse) and evaluate
 
 clear; clc;
 rng(42);
@@ -64,25 +65,49 @@ function [metrics, outFile] = trainOneNoise( ...
 
 data = loadDnn2Dataset(h5Path, noiseLabel, trainRatio, valRatio, testRatio, seed);
 
-dlnetInit = createDnn2Model();
+% Z-score normalization (train statistics only).
+% Use the same XY stats for:
+% - input X(:,1:2)  (PF/LS state estimate)
+% - target Y(:,1:2) (ground-truth position)
+[muXRaw, sigmaXRaw] = channelStats(data.XTrain);
+[muXY, sigmaXY] = channelStats(data.XTrain(:, 1:2));
+
+muX = muXRaw;
+sigmaX = sigmaXRaw;
+muX(1:2) = muXY;
+sigmaX(1:2) = sigmaXY;
+
+XTrainZ = zscoreApply(data.XTrain, muX, sigmaX);
+XValZ = zscoreApply(data.XVal, muX, sigmaX);
+XTestZ = zscoreApply(data.XTest, muX, sigmaX);
+
+YTrainZ = zscoreApply(data.YTrain, muXY, sigmaXY);
+YValZ = zscoreApply(data.YVal, muXY, sigmaXY);
+
+dlnetInit = createDnn2ResidualModel();
 
 opts = trainingOptions(optimizerName, ...
     MaxEpochs=maxEpochs, ...
     MiniBatchSize=miniBatchSize, ...
     InitialLearnRate=initialLearnRate, ...
     Shuffle="every-epoch", ...
-    ValidationData={data.XVal, data.YVal}, ...
-    ValidationFrequency=max(1, floor(size(data.XTrain, 1) / miniBatchSize)), ...
+    ValidationData={XValZ, YValZ}, ...
+    ValidationFrequency=max(1, floor(size(XTrainZ, 1) / miniBatchSize)), ...
     ValidationPatience=validationPatience, ...
     LearnRateSchedule=learnRateSchedule, ...
+    Metrics="rmse", ...
     Verbose=true, ...
     Plots="training-progress");
+% L2Regularization=1e-2, ...
+net = trainnet(XTrainZ, YTrainZ, dlnetInit, "mse", opts);
 
-net = trainnet(data.XTrain, data.YTrain, dlnetInit, "mse", opts);
+YHatTrainZ = minibatchpredict(net, XTrainZ);
+YHatValZ = minibatchpredict(net, XValZ);
+YHatTestZ = minibatchpredict(net, XTestZ);
 
-YHatTrain = minibatchpredict(net, data.XTrain);
-YHatVal = minibatchpredict(net, data.XVal);
-YHatTest = minibatchpredict(net, data.XTest);
+YHatTrain = zscoreInverse(YHatTrainZ, muXY, sigmaXY);
+YHatVal = zscoreInverse(YHatValZ, muXY, sigmaXY);
+YHatTest = zscoreInverse(YHatTestZ, muXY, sigmaXY);
 
 metrics.trainRMSE = rmse(YHatTrain, data.YTrain);
 metrics.valRMSE = rmse(YHatVal, data.YVal);
@@ -101,8 +126,13 @@ if ~isfolder(outDir)
 end
 outFile = fullfile(outDir, "dnn2_postprocess_" + noiseLabel + ".mat");
 
-normalization.muX = data.muX;
-normalization.sigmaX = data.sigmaX;
+normalization.muX = muX;
+normalization.sigmaX = sigmaX;
+normalization.muY = muXY;
+normalization.sigmaY = sigmaXY;
+normalization.muXRaw = muXRaw;
+normalization.sigmaXRaw = sigmaXRaw;
+normalization.xySkipNormalization = "useXFirstTwoStats";
 
 config.h5Path = h5Path;
 config.noiseLabel = noiseLabel;
@@ -183,23 +213,36 @@ data.XVal = XVal;
 data.YVal = YVal;
 data.XTest = XTest;
 data.YTest = YTest;
-data.muX = [];
-data.sigmaX = [];
 end
 
-function net = createDnn2Model()
+function net = createDnn2ResidualModel()
+% Residual model: y = xy_skip + delta
 layers = [
     featureInputLayer(6, Normalization="none", Name="input")
     fullyConnectedLayer(128, Name="fc1")
     reluLayer(Name="relu1")
     fullyConnectedLayer(64, Name="fc2")
     reluLayer(Name="relu2")
-    % fullyConnectedLayer(4, Name="fc3")
-    % reluLayer(Name="relu3")
-    fullyConnectedLayer(2, Name="out")
+    fullyConnectedLayer(2, Name="delta")
+    additionLayer(2, Name="skipadd")
 ];
+
 net = dlnetwork;
 net = addLayers(net, layers);
+net = addLayers(net, functionLayer(@selectXY, Name="xy_skip"));
+net = connectLayers(net, "input", "xy_skip");
+net = connectLayers(net, "xy_skip", "skipadd/in2");
+end
+
+function Y = selectXY(X)
+% Robustly select xy channels from 2-D feature tensor.
+if size(X, 1) == 6
+    Y = X(1:2, :);
+elseif size(X, 2) == 6
+    Y = X(:, 1:2);
+else
+    error("selectXY expects one dimension equal to 6.");
+end
 end
 
 function X = packSamples(xPre, xPF, indices)
@@ -216,6 +259,20 @@ function X = transposeToRows(A)
 % [C, T, N] -> [N*T, C]
 X = permute(A, [3 2 1]);
 X = reshape(X, [], size(A, 1));
+end
+
+function [mu, sigma] = channelStats(A)
+mu = mean(A, 1);
+sigma = std(A, 0, 1);
+sigma(sigma < 1e-12) = 1;
+end
+
+function Z = zscoreApply(A, mu, sigma)
+Z = (A - mu) ./ sigma;
+end
+
+function A = zscoreInverse(Z, mu, sigma)
+A = Z .* sigma + mu;
 end
 
 function v = rmse(A, B)

@@ -18,7 +18,7 @@ trainRatio = 0.80;
 valRatio = 0.10;
 testRatio = 0.10;
 
-maxEpochs = 60;
+maxEpochs = 80;
 miniBatchSize = 512;
 initialLearnRate = 1e-3;
 optimizerName = "adam";

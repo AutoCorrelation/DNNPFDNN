@@ -36,9 +36,11 @@ for k = 1:numel(noiseLabels)
     pf_dnn2_rmse = NaN;
     pfCkpt = fullfile("checkpoints", "dnn2_postprocess_" + noiseLabel + ".mat");
     if isfile(pfCkpt) && isfile(pfDatasetPath)
-        ckptPF = load(pfCkpt, "net");
+        ckptPF = load(pfCkpt, "net", "normalization");
         dataPF = loadDnn2Dataset(pfDatasetPath, noiseLabel, 0.80, 0.10, 0.10, 42);
-        yHatPF = minibatchpredict(ckptPF.net, dataPF.XTest);
+        [xTestPF, muYPF, sigmaYPF] = normalizeForInference(dataPF.XTest, ckptPF);
+        yHatPFZ = minibatchpredict(ckptPF.net, xTestPF);
+        yHatPF = zscoreInverse(yHatPFZ, muYPF, sigmaYPF);
         pf_dnn2_rmse = rmse(yHatPF, dataPF.YTest);
     end
 
@@ -46,9 +48,11 @@ for k = 1:numel(noiseLabels)
     ls_dnn2_rmse = NaN;
     lsCkpt = fullfile("checkpoints", "dnn2_postprocess_ls_" + noiseLabel + ".mat");
     if isfile(lsCkpt) && isfile(lsDatasetPath)
-        ckptLS = load(lsCkpt, "net");
+        ckptLS = load(lsCkpt, "net", "normalization");
         dataLS = loadDnn2Dataset(lsDatasetPath, noiseLabel, 0.80, 0.10, 0.10, 42);
-        yHatLS = minibatchpredict(ckptLS.net, dataLS.XTest);
+        [xTestLS, muYLS, sigmaYLS] = normalizeForInference(dataLS.XTest, ckptLS);
+        yHatLSZ = minibatchpredict(ckptLS.net, xTestLS);
+        yHatLS = zscoreInverse(yHatLSZ, muYLS, sigmaYLS);
         ls_dnn2_rmse = rmse(yHatLS, dataLS.YTest);
     end
 
@@ -130,6 +134,29 @@ else
 end
 end
 
+function [XNorm, muY, sigmaY] = normalizeForInference(X, ckpt)
+% Apply checkpoint normalization consistently with training script.
+XNorm = X;
+muY = [0 0];
+sigmaY = [1 1];
+
+if ~isfield(ckpt, "normalization")
+    return;
+end
+
+normInfo = ckpt.normalization;
+if isfield(normInfo, "muX") && isfield(normInfo, "sigmaX") && ...
+        ~isempty(normInfo.muX) && ~isempty(normInfo.sigmaX)
+    XNorm = zscoreApply(X, normInfo.muX, normInfo.sigmaX);
+end
+
+if isfield(normInfo, "muY") && isfield(normInfo, "sigmaY") && ...
+        ~isempty(normInfo.muY) && ~isempty(normInfo.sigmaY)
+    muY = normInfo.muY;
+    sigmaY = normInfo.sigmaY;
+end
+end
+
 function data = loadDnn2Dataset(h5Path, noiseLabel, trainRatio, valRatio, testRatio, seed)
 % Dataset layout:
 % /<noiseLabel>/xPre [4, T, N]
@@ -184,4 +211,12 @@ function X = transposeToRows(A)
 % [C, T, N] -> [N*T, C]
 X = permute(A, [3 2 1]);
 X = reshape(X, [], size(A, 1));
+end
+
+function Z = zscoreApply(A, mu, sigma)
+Z = (A - mu) ./ sigma;
+end
+
+function A = zscoreInverse(Z, mu, sigma)
+A = Z .* sigma + mu;
 end
