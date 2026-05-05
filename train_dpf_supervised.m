@@ -1,0 +1,417 @@
+%% train_dpf_supervised.m
+% End-to-end supervised differentiable particle filter (DPF)
+% Input : variance-wise ranging data (r1..r4), e.g. /ranging_001
+% Target: /gt_position (px, py)
+
+clear; clc;
+rng(42);
+
+%% Configuration
+h5Path = "ranging_data_cv.h5";
+noiseDatasets = ["/ranging_001", "/ranging_01", "/ranging_1", "/ranging_10", "/ranging_100"];
+
+trainRatio = 0.80;
+valRatio = 0.10;
+testRatio = 0.10;
+
+numParticles = 64;
+processStd = 0.05;
+softResampleLambda = 0.5;
+essThresholdRatio = 0.5; % ESSmin = ratio * Np
+
+maxEpochs = 50;
+miniBatchSize = 16; % number of sequences per mini-batch
+learnRate = 1e-3;
+seed = 42;
+
+if ~isfile(h5Path)
+    error("File not found: %s", h5Path);
+end
+assert(abs(trainRatio + valRatio + testRatio - 1.0) < 1e-12, "Split ratios must sum to 1.");
+
+outDir = "checkpoints";
+if ~isfolder(outDir)
+    mkdir(outDir);
+end
+
+results = table('Size', [numel(noiseDatasets), 5], ...
+    'VariableTypes', ["string", "double", "double", "double", "string"], ...
+    'VariableNames', ["noise", "trainLoss", "valLoss", "testRMSE", "checkpoint"]);
+
+for k = 1:numel(noiseDatasets)
+    noiseDataset = string(noiseDatasets(k));
+    noiseTag = erase(noiseDataset, "/ranging_");
+
+    fprintf("\n=== Train DPF (%s) ===\n", noiseDataset);
+
+    data = loadSequenceDatasetFromRanging(h5Path, noiseDataset, trainRatio, valRatio, testRatio, seed);
+
+    [muZ, sigmaZ] = channelStats3D(data.ZTrain);
+    [muX, sigmaX] = channelStats3D(data.XTrainGT);
+
+    ZTrain = zscoreApply3D(data.ZTrain, muZ, sigmaZ);
+    ZVal = zscoreApply3D(data.ZVal, muZ, sigmaZ);
+    ZTest = zscoreApply3D(data.ZTest, muZ, sigmaZ);
+
+    XTrainGT = zscoreApply3D(data.XTrainGT, muX, sigmaX);
+    XValGT = zscoreApply3D(data.XValGT, muX, sigmaX);
+    XTestGT = zscoreApply3D(data.XTestGT, muX, sigmaX);
+
+    transitionNet = createTransitionNet();
+    measureNet = createMeasureNet();
+
+    trailingAvgTrans = [];
+    trailingAvgSqTrans = [];
+    trailingAvgMeas = [];
+    trailingAvgSqMeas = [];
+
+    numTrain = size(ZTrain, 3);
+    numItersPerEpoch = max(1, ceil(numTrain / miniBatchSize));
+
+    bestValLoss = inf;
+    bestTrainLoss = NaN;
+    bestCheckpoint = fullfile(outDir, "dpf_supervised_" + noiseTag + ".mat");
+
+    globalIter = 0;
+    for epoch = 1:maxEpochs
+        order = randperm(numTrain);
+        trainLossEpoch = 0;
+
+        for it = 1:numItersPerEpoch
+            idxStart = (it - 1) * miniBatchSize + 1;
+            idxEnd = min(it * miniBatchSize, numTrain);
+            mbIdx = order(idxStart:idxEnd);
+
+            Zmb = ZTrain(:, :, mbIdx);
+            Xmb = XTrainGT(:, :, mbIdx);
+
+            [loss, gradTrans, gradMeas] = dlfeval(@modelGradients, ...
+                transitionNet, measureNet, Zmb, Xmb, ...
+                numParticles, processStd, softResampleLambda, essThresholdRatio);
+            globalIter = globalIter + 1;
+
+            [transitionNet, trailingAvgTrans, trailingAvgSqTrans] = adamupdate( ...
+                transitionNet, gradTrans, trailingAvgTrans, trailingAvgSqTrans, globalIter, learnRate);
+            [measureNet, trailingAvgMeas, trailingAvgSqMeas] = adamupdate( ...
+                measureNet, gradMeas, trailingAvgMeas, trailingAvgSqMeas, globalIter, learnRate);
+
+            trainLossEpoch = trainLossEpoch + double(gather(extractdata(loss)));
+        end
+
+        trainLossEpoch = trainLossEpoch / numItersPerEpoch;
+        valLoss = evaluateLoss(transitionNet, measureNet, ZVal, XValGT, ...
+            numParticles, processStd, softResampleLambda, essThresholdRatio, miniBatchSize);
+
+        fprintf("Epoch %3d/%3d | trainLoss=%.6f | valLoss=%.6f\n", epoch, maxEpochs, trainLossEpoch, valLoss);
+
+        if valLoss < bestValLoss
+            bestValLoss = valLoss;
+            bestTrainLoss = trainLossEpoch;
+
+            normalization.muZ = muZ;
+            normalization.sigmaZ = sigmaZ;
+            normalization.muX = muX;
+            normalization.sigmaX = sigmaX;
+
+            config.h5Path = h5Path;
+            config.noiseDataset = noiseDataset;
+            config.noiseTag = noiseTag;
+            config.numParticles = numParticles;
+            config.processStd = processStd;
+            config.softResampleLambda = softResampleLambda;
+            config.essThresholdRatio = essThresholdRatio;
+            config.maxEpochs = maxEpochs;
+            config.miniBatchSize = miniBatchSize;
+            config.learnRate = learnRate;
+            config.seed = seed;
+            config.trainRatio = trainRatio;
+            config.valRatio = valRatio;
+            config.testRatio = testRatio;
+            config.idxTrain = data.idxTrain;
+            config.idxVal = data.idxVal;
+            config.idxTest = data.idxTest;
+
+            save(bestCheckpoint, "transitionNet", "measureNet", "normalization", "config", "bestValLoss", "bestTrainLoss");
+        end
+    end
+
+    S = load(bestCheckpoint, "transitionNet", "measureNet", "normalization");
+    testLoss = evaluateLoss(S.transitionNet, S.measureNet, ZTest, XTestGT, ...
+        numParticles, processStd, softResampleLambda, essThresholdRatio, miniBatchSize);
+    [rmseMean, ~] = evaluateRMSE(S.transitionNet, S.measureNet, ZTest, XTestGT, S.normalization, ...
+        numParticles, processStd, softResampleLambda, essThresholdRatio, miniBatchSize);
+
+    results.noise(k) = noiseDataset;
+    results.trainLoss(k) = bestTrainLoss;
+    results.valLoss(k) = bestValLoss;
+    results.testRMSE(k) = rmseMean;
+    results.checkpoint(k) = string(bestCheckpoint);
+
+    fprintf("Result %s | valLoss=%.6f | testLoss=%.6f | testRMSE=%.6f\n", ...
+        noiseDataset, bestValLoss, testLoss, rmseMean);
+    fprintf("Saved: %s\n", bestCheckpoint);
+end
+
+fprintf("\n=== DPF Summary ===\n");
+disp(results);
+
+%% Local functions
+function net = createTransitionNet()
+layers = [
+    featureInputLayer(6, Normalization="none", Name="input")
+    fullyConnectedLayer(64, Name="fc1")
+    reluLayer(Name="relu1")
+    fullyConnectedLayer(64, Name="fc2")
+    reluLayer(Name="relu2")
+    fullyConnectedLayer(2, Name="dx")
+];
+net = dlnetwork(layerGraph(layers));
+end
+
+function net = createMeasureNet()
+layers = [
+    featureInputLayer(6, Normalization="none", Name="input")
+    fullyConnectedLayer(64, Name="fc1")
+    reluLayer(Name="relu1")
+    fullyConnectedLayer(32, Name="fc2")
+    reluLayer(Name="relu2")
+    fullyConnectedLayer(1, Name="logit")
+];
+net = dlnetwork(layerGraph(layers));
+end
+
+function [loss, gradTrans, gradMeas] = modelGradients(transitionNet, measureNet, Z, XGT, numParticles, processStd, softResampleLambda, essThresholdRatio)
+loss = dpfLoss(transitionNet, measureNet, Z, XGT, numParticles, processStd, softResampleLambda, essThresholdRatio);
+[gradTrans, gradMeas] = dlgradient(loss, transitionNet.Learnables, measureNet.Learnables);
+end
+
+function loss = dpfLoss(transitionNet, measureNet, Z, XGT, numParticles, processStd, softResampleLambda, essThresholdRatio)
+Z = dlarray(single(Z));
+XGT = dlarray(single(XGT));
+
+[~, T, B] = size(Z);
+
+x0 = squeeze(XGT(:, 1, :));
+x0 = reshape(x0, 2, 1, B);
+particles = repmat(x0, 1, numParticles, 1) + processStd * dlarray(randn(2, numParticles, B, "single"));
+logw = dlarray(zeros(numParticles, B, "single"));
+
+lossAcc = dlarray(single(0));
+
+for t = 1:T
+    zt = squeeze(Z(:, t, :));
+    zRep = repmat(reshape(zt, 4, 1, B), 1, numParticles, 1);
+
+    logwNorm = logw - max(logw, [], 1);
+    Wprev = exp(logwNorm);
+    Wprev = Wprev ./ max(sum(Wprev, 1), 1e-8);
+
+    ess = 1 ./ max(sum(Wprev.^2, 1), 1e-8);
+    essMin = essThresholdRatio * numParticles;
+
+    particlesNum = extractdata(particles);
+    WprevNum = extractdata(Wprev);
+    essNum = extractdata(ess);
+
+    particlesRes = zeros(size(particlesNum), "single");
+    logCorrNum = zeros(numParticles, B, "single");
+
+    for b = 1:B
+        wb = WprevNum(:, b);
+        if essNum(b) < essMin
+            wMix = softResampleLambda * wb + (1 - softResampleLambda) * (1 / numParticles);
+            idxA = sampleFromWeights(wMix, numParticles);
+            particlesRes(:, :, b) = particlesNum(:, idxA, b);
+            logCorrNum(:, b) = log(wb(idxA) + 1e-8) - log(wMix(idxA) + 1e-8);
+        else
+            particlesRes(:, :, b) = particlesNum(:, :, b);
+            logCorrNum(:, b) = log(wb + 1e-8);
+        end
+    end
+
+    particles = dlarray(particlesRes);
+    logCorr = dlarray(logCorrNum);
+
+    xFlat = reshape(permute(particles, [1 3 2]), 2, []);
+    zFlat = reshape(permute(zRep, [1 3 2]), 4, []);
+
+    dx = forward(transitionNet, dlarray([xFlat; zFlat], "CB"));
+    xPredFlat = xFlat + dx + processStd * dlarray(randn(size(xFlat), "single"));
+
+    logit = forward(measureNet, dlarray([xPredFlat; zFlat], "CB"));
+    logitMat = reshape(logit, numParticles, B);
+
+    logw = logCorr + logitMat;
+    logwNorm = logw - max(logw, [], 1);
+    w = exp(logwNorm);
+    w = w ./ max(sum(w, 1), 1e-8);
+
+    particles = permute(reshape(xPredFlat, 2, B, numParticles), [1 3 2]);
+
+    xHat = squeeze(sum(particles .* reshape(w, 1, numParticles, B), 2));
+    xGtT = squeeze(XGT(:, t, :));
+
+    lossAcc = lossAcc + mean((xHat - xGtT).^2, "all");
+end
+
+loss = lossAcc / T;
+end
+
+function loss = evaluateLoss(transitionNet, measureNet, Z, XGT, numParticles, processStd, softResampleLambda, essThresholdRatio, miniBatchSize)
+numSeq = size(Z, 3);
+numIters = max(1, ceil(numSeq / miniBatchSize));
+lossAcc = 0;
+for it = 1:numIters
+    idxStart = (it - 1) * miniBatchSize + 1;
+    idxEnd = min(it * miniBatchSize, numSeq);
+    idx = idxStart:idxEnd;
+
+    l = dlfeval(@dpfLoss, transitionNet, measureNet, Z(:, :, idx), XGT(:, :, idx), ...
+        numParticles, processStd, softResampleLambda, essThresholdRatio);
+    lossAcc = lossAcc + double(gather(extractdata(l)));
+end
+loss = lossAcc / numIters;
+end
+
+function [rmseMean, rmsePerStep] = evaluateRMSE(transitionNet, measureNet, Z, XGT, normalization, numParticles, processStd, softResampleLambda, essThresholdRatio, miniBatchSize)
+numSeq = size(Z, 3);
+T = size(Z, 2);
+seStep = zeros(T, 1);
+numCount = 0;
+
+numIters = max(1, ceil(numSeq / miniBatchSize));
+for it = 1:numIters
+    idxStart = (it - 1) * miniBatchSize + 1;
+    idxEnd = min(it * miniBatchSize, numSeq);
+    idx = idxStart:idxEnd;
+
+    [xHatZ, xGtZ] = inferBatch(transitionNet, measureNet, Z(:, :, idx), XGT(:, :, idx), ...
+        numParticles, processStd, softResampleLambda, essThresholdRatio);
+
+    xHat = zscoreInverse3D(xHatZ, normalization.muX, normalization.sigmaX);
+    xGt = zscoreInverse3D(xGtZ, normalization.muX, normalization.sigmaX);
+
+    err2 = squeeze(sum((xHat - xGt).^2, 1));
+    seStep = seStep + sum(err2, 2);
+    numCount = numCount + size(err2, 2);
+end
+
+rmsePerStep = sqrt(seStep / max(numCount, 1));
+rmseMean = mean(rmsePerStep);
+end
+
+function [xHatSeq, xGtSeq] = inferBatch(transitionNet, measureNet, Z, XGT, numParticles, processStd, softResampleLambda, essThresholdRatio)
+[~, T, B] = size(Z);
+
+x0 = squeeze(XGT(:, 1, :));
+x0 = reshape(x0, 2, 1, B);
+particles = repmat(x0, 1, numParticles, 1) + processStd * randn(2, numParticles, B, "single");
+logw = zeros(numParticles, B, "single");
+
+xHatSeq = zeros(2, T, B, "single");
+xGtSeq = XGT;
+
+for t = 1:T
+    zt = squeeze(Z(:, t, :));
+    zRep = repmat(reshape(zt, 4, 1, B), 1, numParticles, 1);
+
+    logwNorm = logw - max(logw, [], 1);
+    Wprev = exp(logwNorm);
+    Wprev = Wprev ./ max(sum(Wprev, 1), 1e-8);
+    ess = 1 ./ max(sum(Wprev.^2, 1), 1e-8);
+    essMin = essThresholdRatio * numParticles;
+
+    particlesRes = zeros(size(particles), "single");
+    logCorr = zeros(numParticles, B, "single");
+
+    for b = 1:B
+        wb = Wprev(:, b);
+        if ess(b) < essMin
+            wMix = softResampleLambda * wb + (1 - softResampleLambda) * (1 / numParticles);
+            idxA = sampleFromWeights(wMix, numParticles);
+            particlesRes(:, :, b) = particles(:, idxA, b);
+            logCorr(:, b) = log(wb(idxA) + 1e-8) - log(wMix(idxA) + 1e-8);
+        else
+            particlesRes(:, :, b) = particles(:, :, b);
+            logCorr(:, b) = log(wb + 1e-8);
+        end
+    end
+    particles = particlesRes;
+
+    xFlat = reshape(permute(particles, [1 3 2]), 2, []);
+    zFlat = reshape(permute(zRep, [1 3 2]), 4, []);
+
+    dx = forward(transitionNet, dlarray([xFlat; zFlat], "CB"));
+    xPredFlat = xFlat + extractdata(dx) + processStd * randn(size(xFlat), "like", xFlat);
+
+    logit = forward(measureNet, dlarray([xPredFlat; zFlat], "CB"));
+    logitMat = reshape(extractdata(logit), numParticles, B);
+
+    logw = logCorr + logitMat;
+    logwNorm = logw - max(logw, [], 1);
+    w = exp(logwNorm);
+    w = w ./ max(sum(w, 1), 1e-8);
+
+    particles = permute(reshape(xPredFlat, 2, B, numParticles), [1 3 2]);
+    xHatSeq(:, t, :) = sum(particles .* reshape(w, 1, numParticles, B), 2);
+end
+end
+
+function idx = sampleFromWeights(w, N)
+w = w(:);
+w = w / max(sum(w), 1e-8);
+cdf = cumsum(w);
+u = rand(N, 1);
+idx = zeros(N, 1);
+for i = 1:N
+    idx(i) = find(cdf >= u(i), 1, "first");
+end
+end
+
+function data = loadSequenceDatasetFromRanging(h5Path, noiseDataset, trainRatio, valRatio, testRatio, seed)
+Z = h5read(h5Path, noiseDataset);      % [4,T,N]
+gtPos = h5read(h5Path, "/gt_position"); % [2,T]
+
+[nZ, T, N] = size(Z);
+[nX, TX] = size(gtPos);
+if nZ ~= 4 || nX ~= 2 || T ~= TX
+    error("Unexpected dataset shape for %s.", noiseDataset);
+end
+
+XGT = repmat(gtPos, 1, 1, N); % [2,T,N]
+
+rng(seed);
+perm = randperm(N);
+nTrain = floor(trainRatio * N);
+nVal = floor(valRatio * N);
+
+idxTrain = perm(1:nTrain);
+idxVal = perm(nTrain + 1:nTrain + nVal);
+idxTest = perm(nTrain + nVal + 1:end);
+
+data.ZTrain = single(Z(:, :, idxTrain));
+data.XTrainGT = single(XGT(:, :, idxTrain));
+data.ZVal = single(Z(:, :, idxVal));
+data.XValGT = single(XGT(:, :, idxVal));
+data.ZTest = single(Z(:, :, idxTest));
+data.XTestGT = single(XGT(:, :, idxTest));
+
+data.idxTrain = idxTrain;
+data.idxVal = idxVal;
+data.idxTest = idxTest;
+end
+
+function [mu, sigma] = channelStats3D(A)
+A2 = reshape(permute(A, [1 3 2]), size(A, 1), []);
+mu = mean(A2, 2);
+sigma = std(A2, 0, 2);
+sigma(sigma < 1e-12) = 1;
+end
+
+function Z = zscoreApply3D(A, mu, sigma)
+Z = (A - reshape(mu, [], 1, 1)) ./ reshape(sigma, [], 1, 1);
+end
+
+function A = zscoreInverse3D(Z, mu, sigma)
+A = Z .* reshape(sigma, [], 1, 1) + reshape(mu, [], 1, 1);
+end

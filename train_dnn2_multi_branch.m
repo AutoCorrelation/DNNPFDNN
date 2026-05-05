@@ -89,7 +89,7 @@ function [metrics, outFile] = trainOneNoise( ...
     validationPatience, learnRateSchedule)
 
 data = loadDnn2Dataset(h5Path, noiseLabel, trainRatio, valRatio, testRatio, seed);
-dlnetInit = createDnn2Model();
+dlnetInit = createDnn2ResidualModel();
 
 opts = trainingOptions(optimizerName, ...
     MaxEpochs=maxEpochs, ...
@@ -103,7 +103,7 @@ opts = trainingOptions(optimizerName, ...
     Verbose=true, ...
     Plots="training-progress");
 
-net = trainnet(data.XTrain, data.YTrain, dlnetInit, "mse", opts);
+net = trainnet(data.XTrain, data.YTrain, dlnetInit, "l1loss", opts);
 
 YHatTrain = minibatchpredict(net, data.XTrain);
 YHatVal = minibatchpredict(net, data.XVal);
@@ -214,16 +214,33 @@ end
 function net = createDnn2Model()
 layers = [
     featureInputLayer(6, Normalization="none", Name="input")
-    fullyConnectedLayer(16, Name="fc1")
+    fullyConnectedLayer(128, Name="fc1")
     reluLayer(Name="relu1")
-    fullyConnectedLayer(32, Name="fc2")
+    fullyConnectedLayer(64, Name="fc2")
     reluLayer(Name="relu2")
-    fullyConnectedLayer(16, Name="fc3")
-    reluLayer(Name="relu3")
     fullyConnectedLayer(2, Name="out")
 ];
 net = dlnetwork;
 net = addLayers(net, layers);
+end
+
+function net = createDnn2ResidualModel()
+% Residual model: y = xy_skip + delta
+layers = [
+    featureInputLayer(6, Normalization="none", Name="input")
+    fullyConnectedLayer(128, Name="fc1")
+    reluLayer(Name="relu1")
+    fullyConnectedLayer(64, Name="fc2")
+    reluLayer(Name="relu2")
+    fullyConnectedLayer(2, Name="delta")
+    additionLayer(2, Name="skipadd")
+];
+
+net = dlnetwork;
+net = addLayers(net, layers);
+net = addLayers(net, functionLayer(@selectXY, Name="xy_skip"));
+net = connectLayers(net, "input", "xy_skip");
+net = connectLayers(net, "xy_skip", "skipadd/in2");
 end
 
 function X = packSamples(xPre, xPF, indices)
